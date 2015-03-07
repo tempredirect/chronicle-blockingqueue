@@ -117,11 +117,19 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
 
   static class RemoveOperations extends ChronicleBlockingQueueSpec {
     @AutoCleanup
-    ChronicleBlockingQueue testObject = ChronicleBlockingQueue.builder(tempDir()).build()
+    ChronicleBlockingQueue testObject = standardQueue(maxPerSlab: 3) // makes sure it slabs
 
     def "poll returns null if empty"() {
       expect:
       testObject.poll() == null
+    }
+
+    def "remove throws on empty"() {
+      when:
+      testObject.remove()
+
+      then:
+      thrown NoSuchElementException
     }
 
     def "poll returns the elements in the order they where appended"() {
@@ -135,6 +143,20 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
       when: "read all the elements in the queue"
       while ((value = testObject.poll()) != null)
         elements << value
+
+      then:
+      elements == input
+    }
+
+    def "removing returns the elements in the order they where appended"() {
+      given:
+      def input = 1..5 as List
+      def elements = []
+
+      testObject.addAll(input)
+
+      when: "read all the elements in the queue"
+      5.times { elements << testObject.remove() }
 
       then:
       elements == input

@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Queue;
 import java.util.stream.Collectors;
@@ -26,9 +27,11 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
 
     private final File storageDirectory;
     private final String name;
-    private final BytesSerializer<E> serializer = (E element, Bytes bytes) -> { bytes.writeObject(element);};
+    private final BytesSerializer<E> serializer = (E element, Bytes bytes) -> {
+        bytes.writeObject(element);
+    };
     @SuppressWarnings("unchecked")
-    private final BytesDeserializer<E> deserializer = (Bytes bytes) -> (E)bytes.readObject();
+    private final BytesDeserializer<E> deserializer = (Bytes bytes) -> (E) bytes.readObject();
     private final int maxPerSlab;
     private final ChroniclePosition position;
 
@@ -51,7 +54,7 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
         this.position = new ChroniclePosition(positionFile);
         appender(); // force initialisation of the appender, will create the first slab
 
-        if (newPositionFile){
+        if (newPositionFile) {
             this.position.slab(firstSlabIndex());
             this.position.index(-1);
         }
@@ -80,7 +83,7 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
         if (o == null) return false;
 
         QueueIterator iter = iterator();
-        while(iter.hasNext()) {
+        while (iter.hasNext()) {
             E value = iter.next();
             if (value.equals(o)) {
                 iter.close();
@@ -109,10 +112,97 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
     }
 
     @Override
+    public boolean remove(Object o) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public boolean containsAll(Collection<?> c) {
+        for (Object e : c)
+            if (!contains(e))
+                return false;
+        return true;
+    }
+
+    @Override
+    public boolean addAll(Collection<? extends E> c) {
+        c.forEach(this::add);
+        return true;
+    }
+
+    @Override
+    public boolean removeAll(Collection<?> c) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public boolean retainAll(Collection<?> c) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void clear() {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
     public boolean add(E e) {
         if (offer(e))
             return true;
         throw new IllegalStateException();
+    }
+
+    @Override
+    public boolean offer(E e) {
+        if (e == null) {
+            throw new NullPointerException("null elements are not permitted");
+        }
+        if (shouldRollSlab()) {
+            releaseCachedAppender();
+        }
+        ExcerptAppender appender = appender();
+
+        appender.startExcerpt();
+        serializer.serialise(e, appender);
+        appender.finish();
+        return true;
+    }
+
+    @Override
+    public E remove() {
+        E value = poll();
+        if (value == null) throw new NoSuchElementException();
+        return value;
+    }
+
+    @Override
+    public E poll() {
+        ExcerptTailer tailer = cachedTailerForSlab(position.slab());
+        toPosition(position, tailer);
+
+        E value = readAndUpdate(tailer, position);
+        if (value != null)
+            return value;
+
+        // maybe the next slab has some?
+        if (cachedTailerSlabIndex == cachedAppenderSlabIndex) {
+            // ie we're reading the same thing that is being written
+            return null; // there is nothing more stop looking
+        }
+
+        int slab = position.incrementSlabAndResetIndex();
+        tailer = cachedTailerForSlab(slab);
+        return readAndUpdate(tailer, position);
+    }
+
+    @Override
+    public E element() {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public E peek() {
+        throw new UnsupportedOperationException();
     }
 
     private ExcerptAppender appender() {
@@ -168,7 +258,6 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
         return name + '-' + i;
     }
 
-
     boolean isSlabIndex(File file) {
         return slabIndex(file) > -1;
     }
@@ -197,56 +286,6 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
         return -1;
     }
 
-    @Override
-    public boolean containsAll(Collection<?> c) {
-        for (Object e : c)
-            if (!contains(e))
-                return false;
-        return true;
-    }
-
-    @Override
-    public boolean addAll(Collection<? extends E> c) {
-        c.forEach(this::add);
-        return true;
-    }
-
-    @Override
-    public boolean remove(Object o) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public boolean removeAll(Collection<?> c) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public boolean retainAll(Collection<?> c) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public void clear() {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public boolean offer(E e) {
-        if (e == null) {
-            throw new NullPointerException("null elements are not permitted");
-        }
-        if (shouldRollSlab()) {
-            releaseCachedAppender();
-        }
-        ExcerptAppender appender = appender();
-
-        appender.startExcerpt();
-        serializer.serialise(e, appender);
-        appender.finish();
-        return true;
-    }
-
     private void releaseCachedAppender() {
         release(cachedAppender);
         cachedAppender = null;
@@ -261,36 +300,11 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
         return false;
     }
 
-    @Override
-    public E remove() {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public E poll() {
-        ExcerptTailer tailer = cachedTailerForSlab(position.slab());
-        toPosition(position, tailer);
-
-        E value = readAndUpdate(tailer, position);
-        if (value != null)
-            return value;
-
-        // maybe the next slab has some?
-        if (cachedTailerSlabIndex == cachedAppenderSlabIndex) {
-            // ie we're reading the same thing that is being written
-            return null; // there is nothing more stop looking
-        }
-
-        int slab = position.incrementSlabAndResetIndex();
-        tailer = cachedTailerForSlab(slab);
-        return readAndUpdate(tailer, position);
-    }
-
     private E readAndUpdate(ExcerptTailer tailer, ChroniclePosition position) {
         if (tailer.nextIndex()) {
             E value = deserializer.deserialise(tailer);
 
-            position.index((int)tailer.index());
+            position.index((int) tailer.index());
             return value;
         }
         return null;
@@ -343,16 +357,6 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
     }
 
     @Override
-    public E element() {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public E peek() {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
     public String toString() {
         return "ChronicleBlockingQueue";
     }
@@ -362,6 +366,15 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
         release(cachedTailer);
         release(cachedAppender);
         position.close();
+    }
+
+    @NotNull
+    private ArrayList<E> asList() {
+        ArrayList<E> copy = new ArrayList<>();
+        for (E value : this) {
+            copy.add(value);
+        }
+        return copy;
     }
 
     public static class Builder<E> {
@@ -374,8 +387,9 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
                 throw new IllegalArgumentException("storageDirectory is required");
             }
             if (!storageDirectory.isDirectory()) {
-                throw new IllegalArgumentException("storageDirectory :" + storageDirectory
-                        + " is not a path to a directory");
+                throw new IllegalArgumentException(
+                        "storageDirectory :" + storageDirectory
+                                + " is not a path to a directory");
             }
             this.storageDirectory = storageDirectory;
         }
@@ -418,7 +432,7 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
                 return endOfData();
             }
             // move on to the next slab
-            slab ++;
+            slab++;
             release(tailer);
             tailer = chronicleTailer(slab);
             tailer.toStart();
@@ -430,14 +444,5 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
             release(tailer);
             tailer = null; //
         }
-    }
-
-    @NotNull
-    private ArrayList<E> asList() {
-        ArrayList<E> copy = new ArrayList<>();
-        for( E value : this) {
-            copy.add(value);
-        }
-        return copy;
     }
 }
