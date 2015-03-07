@@ -1,9 +1,15 @@
 package com.logicalpractice.chronicle.blockingqueue
 
-import com.google.common.io.Files
+import com.google.common.io.Files as GuavaFiles
 import spock.lang.AutoCleanup
 import spock.lang.Specification
 import spock.lang.Unroll
+
+import java.nio.file.FileVisitResult
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
 
 /**
  *
@@ -14,11 +20,35 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
 
   File tempDir() {
     if (tempDir == null) {
-      tempDir = Files.createTempDir()
+      tempDir = GuavaFiles.createTempDir()
     }
     tempDir
   }
 
+  ChronicleBlockingQueue standardQueue(HashMap args = [:]) {
+    ChronicleBlockingQueue.builder(tempDir())
+        .maxPerSlab(args.getOrDefault("maxPerSlab", 10))
+        .build()
+  }
+
+  def cleanup()  {
+    if (tempDir != null) {
+      Files.walkFileTree(tempDir.toPath(), new SimpleFileVisitor<Path>() {
+
+        @Override
+        FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+          Files.delete(file)
+          FileVisitResult.CONTINUE
+        }
+
+        @Override
+        FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
+          Files.delete(dir)
+          FileVisitResult.CONTINUE
+        }
+      })
+    }
+  }
   static class BuilderSpec extends ChronicleBlockingQueueSpec {
 
     def "builder doesn't allow invalid storage file"() {
@@ -46,6 +76,12 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
   @Unroll
   static class SlabIndex extends ChronicleBlockingQueueSpec {
     ChronicleBlockingQueue testObject = ChronicleBlockingQueue.builder(tempDir()).name("simple").build()
+
+    def "always true"() {
+      // this just removes a messy artifact any running the tests in IDEA
+      expect:
+      true
+    }
 
     def "isSlabIndex(#filename) expect #result"() {
       given:
@@ -144,9 +180,7 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
 
   static class MaxPerSlab extends ChronicleBlockingQueueSpec {
     @AutoCleanup
-    ChronicleBlockingQueue testObject = ChronicleBlockingQueue.builder(tempDir())
-        .maxPerSlab(3)
-        .build()
+    ChronicleBlockingQueue testObject = standardQueue(maxPerSlab: 3)
 
     def "adding more than maxPerSlab results in additional slab files"() {
       expect: "initial state is three files"
@@ -167,9 +201,149 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
       while ((value = testObject.poll()) != null)
         elements << value
 
-
       then:
       elements == (1..15) as List
+    }
+  }
+
+  static class Iteration extends ChronicleBlockingQueueSpec {
+
+    @AutoCleanup
+    ChronicleBlockingQueue testObject = standardQueue()
+
+    def "over the elements of the queue"() {
+      given:
+      testObject.addAll(1..15)
+
+      expect:
+      testObject.iterator().collect {it} == 1..15 as List
+    }
+
+    def "iterates from the tail"() {
+      given:
+      testObject.addAll(1..10)
+
+      when:
+      3.times { testObject.poll() }
+
+      then:
+      testObject.iterator().collect {it} == 4..10 as List
+    }
+
+    def "iterator.remove() is not supported"() {
+      given:
+      testObject.add(1)
+      def iterator = testObject.iterator()
+      iterator.next()
+
+      when:
+      iterator.remove()
+
+      then:
+      thrown UnsupportedOperationException
+    }
+
+    def "iterator is empty on empty queue"() {
+      expect:
+      ! testObject.iterator().hasNext()
+
+      when:
+      testObject.addAll(1..15)
+      while(testObject.poll()); // drain it
+
+      then:
+      ! testObject.iterator().hasNext()
+    }
+
+  }
+
+  static class Size extends ChronicleBlockingQueueSpec {
+    @AutoCleanup
+    ChronicleBlockingQueue testObject = standardQueue()
+
+    def "size is maintained as elements are added and removed"() {
+      expect:
+      testObject.size() == 0
+
+      when:
+      testObject << 1
+
+      then:
+      testObject.size() == 1
+
+      when:
+      testObject.poll()
+
+      then:
+      testObject.size() == 0
+    }
+  }
+
+  static class Contains extends ChronicleBlockingQueueSpec {
+
+    @AutoCleanup
+    ChronicleBlockingQueue testObject = standardQueue()
+
+    def "contains(thing)"() {
+      given:
+      testObject.addAll(1..15)
+
+      expect:
+      testObject.contains(5)
+
+      and:
+      !testObject.contains(20)
+    }
+
+    def "containsAll(things)"() {
+      given:
+      testObject.addAll(1..15)
+
+      expect:
+      testObject.containsAll(1..3)
+      testObject.containsAll(7..13)
+
+      and:
+      ! testObject.containsAll(10..20)
+    }
+  }
+
+  static class ToArray extends ChronicleBlockingQueueSpec {
+    @AutoCleanup
+    ChronicleBlockingQueue testObject = standardQueue()
+
+    def "toArray()"() {
+      given:
+      testObject.addAll(1..15)
+
+      expect:
+      testObject.toArray() as List == 1..15 as List
+    }
+
+    def "toArray(E[0])"() {
+      given:
+      testObject.addAll(1..15)
+      def intArray = new Integer[0]
+
+      when:
+      def result = testObject.toArray(intArray)
+
+      then:
+      result as List == 1..15 as List
+      result.class.array
+      result.class.componentType == Integer
+    }
+
+    def "toArray(E[size()])"() {
+      given:
+      testObject.addAll(1..15)
+      def intArray = new Integer[testObject.size()]
+
+      when:
+      def result = testObject.toArray(intArray)
+
+      then:
+      result.is(intArray)
     }
   }
 }

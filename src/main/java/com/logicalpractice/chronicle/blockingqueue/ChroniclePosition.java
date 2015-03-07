@@ -61,6 +61,8 @@ public class ChroniclePosition implements Closeable {
 
     public void index(int newIndex) {
         long value = get() & 0xffffffff_00000000L; // get and clean lower 32 bits
-        set( value | newIndex );
+        long longNewIndex = ((long)newIndex) & 0xffffffffL; // else if newIndex is negative the upcase will populate
+                                                            // the higher 32 bits of the long
+        set( value | longNewIndex );
     }
 }

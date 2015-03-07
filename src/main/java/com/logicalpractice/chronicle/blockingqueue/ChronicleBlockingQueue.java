@@ -1,5 +1,6 @@
 package com.logicalpractice.chronicle.blockingqueue;
 
+import com.google.common.collect.AbstractIterator;
 import net.openhft.chronicle.Chronicle;
 import net.openhft.chronicle.ChronicleQueueBuilder;
 import net.openhft.chronicle.ExcerptAppender;
@@ -9,9 +10,9 @@ import org.jetbrains.annotations.NotNull;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.Iterator;
 import java.util.Objects;
 import java.util.Queue;
 import java.util.stream.Collectors;
@@ -42,8 +43,18 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
         this.storageDirectory = storageDirectory;
         this.name = name;
         this.maxPerSlab = maxPerSlab;
-        this.position = new ChroniclePosition(new File(storageDirectory, name + ".position"));
+
+        // basic initialisation
+        File positionFile = new File(storageDirectory, name + ".position");
+        boolean newPositionFile = !positionFile.exists();
+
+        this.position = new ChroniclePosition(positionFile);
         appender(); // force initialisation of the appender, will create the first slab
+
+        if (newPositionFile){
+            this.position.slab(firstSlabIndex());
+            this.position.index(-1);
+        }
     }
 
     public static <E> ChronicleBlockingQueue.Builder<E> builder(File storageDirectory) {
@@ -52,7 +63,11 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
 
     @Override
     public int size() {
-        return 0;
+        int size = 0;
+        for (E e : this) {
+            size++;
+        }
+        return size;
     }
 
     @Override
@@ -62,25 +77,35 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
 
     @Override
     public boolean contains(Object o) {
+        if (o == null) return false;
+
+        QueueIterator iter = iterator();
+        while(iter.hasNext()) {
+            E value = iter.next();
+            if (value.equals(o)) {
+                iter.close();
+                return true;
+            }
+        }
         return false;
     }
 
     @NotNull
     @Override
-    public Iterator<E> iterator() {
-        throw new UnsupportedOperationException();
+    public QueueIterator iterator() {
+        return new QueueIterator(position);
     }
 
     @NotNull
     @Override
     public Object[] toArray() {
-        throw new UnsupportedOperationException();
+        return asList().toArray();
     }
 
     @NotNull
     @Override
     public <T> T[] toArray(T[] a) {
-        throw new UnsupportedOperationException();
+        return asList().toArray(a);
     }
 
     @Override
@@ -139,10 +164,10 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
                 .collect(Collectors.summarizingInt(this::slabIndex)).getMin();
     }
 
-
     private String slabName(int i) {
         return name + '-' + i;
     }
+
 
     boolean isSlabIndex(File file) {
         return slabIndex(file) > -1;
@@ -173,19 +198,22 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
     }
 
     @Override
-    public boolean remove(Object o) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
     public boolean containsAll(Collection<?> c) {
-        throw new UnsupportedOperationException();
+        for (Object e : c)
+            if (!contains(e))
+                return false;
+        return true;
     }
 
     @Override
     public boolean addAll(Collection<? extends E> c) {
         c.forEach(this::add);
         return true;
+    }
+
+    @Override
+    public boolean remove(Object o) {
+        throw new UnsupportedOperationException();
     }
 
     @Override
@@ -240,7 +268,8 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
 
     @Override
     public E poll() {
-        ExcerptTailer tailer = tailerAtPosition(position);
+        ExcerptTailer tailer = cachedTailerForSlab(position.slab());
+        toPosition(position, tailer);
 
         E value = readAndUpdate(tailer, position);
         if (value != null)
@@ -253,7 +282,7 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
         }
 
         int slab = position.incrementSlabAndResetIndex();
-        tailer = tailerForSlab(slab);
+        tailer = cachedTailerForSlab(slab);
         return readAndUpdate(tailer, position);
     }
 
@@ -261,37 +290,27 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
         if (tailer.nextIndex()) {
             E value = deserializer.deserialise(tailer);
 
-            if (position != null)
-                position.index((int)tailer.index());
+            position.index((int)tailer.index());
             return value;
         }
         return null;
     }
 
-    private ExcerptTailer tailerAtPosition(ChroniclePosition pos) {
-        int slab = pos.slab();
-
-        if (slab == 0){
-            slab = firstSlabIndex();
-            pos.slab(slab);
-        }
-        ExcerptTailer tailer = tailerForSlab(slab);
-
+    private void toPosition(ChroniclePosition pos, ExcerptTailer tailer) {
         boolean found;
         int index = pos.index();
-        if (index == 0) {
+        if (index == -1) {
             tailer.toStart();
             found = true;
         } else {
             found = tailer.index(pos.index());
         }
         if (!found) {
-            throw new IllegalStateException("chronicle position slab:" + slab + " index:" + index);
+            throw new IllegalStateException("chronicle position slab:" + pos.slab() + " index:" + index);
         }
-        return tailer;
     }
 
-    private ExcerptTailer tailerForSlab(int slab) {
+    private ExcerptTailer cachedTailerForSlab(int slab) {
         ExcerptTailer tailer;
         if (slab != cachedTailerSlabIndex) {
             release(cachedTailer);
@@ -377,5 +396,48 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
                     name,
                     maxPerSlab);
         }
+    }
+
+    public class QueueIterator extends AbstractIterator<E> implements AutoCloseable {
+        private ExcerptTailer tailer;
+        private int slab;
+
+        QueueIterator(ChroniclePosition position) {
+            this.slab = position.slab();
+            this.tailer = chronicleTailer(slab);
+            toPosition(position, tailer); // navigate to the initial position or die
+        }
+
+        @Override
+        protected E computeNext() {
+            if (tailer.nextIndex()) {
+                return deserializer.deserialise(tailer);
+            }
+            if (slab == cachedAppenderSlabIndex) {
+                close();
+                return endOfData();
+            }
+            // move on to the next slab
+            slab ++;
+            release(tailer);
+            tailer = chronicleTailer(slab);
+            tailer.toStart();
+
+            return computeNext();
+        }
+
+        public void close() {
+            release(tailer);
+            tailer = null; //
+        }
+    }
+
+    @NotNull
+    private ArrayList<E> asList() {
+        ArrayList<E> copy = new ArrayList<>();
+        for( E value : this) {
+            copy.add(value);
+        }
+        return copy;
     }
 }
