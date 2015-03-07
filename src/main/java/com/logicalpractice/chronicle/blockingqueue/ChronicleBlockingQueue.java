@@ -7,7 +7,6 @@ import net.openhft.chronicle.ExcerptTailer;
 import net.openhft.lang.io.Bytes;
 import org.jetbrains.annotations.NotNull;
 
-import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.util.Arrays;
@@ -29,18 +28,20 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
     private final BytesSerializer<E> serializer = (E element, Bytes bytes) -> { bytes.writeObject(element);};
     @SuppressWarnings("unchecked")
     private final BytesDeserializer<E> deserializer = (Bytes bytes) -> (E)bytes.readObject();
+    private final int maxPerSlab;
+    private final ChroniclePosition position;
 
     private ExcerptAppender cachedAppender;
-    private volatile int cachedAppenderSlabIndex = NOT_SET; // is shared between writer and reader
 
+    private volatile int cachedAppenderSlabIndex = NOT_SET; // is shared between writer and reader
     private ExcerptTailer cachedTailer;
+
     private int cachedTailerSlabIndex = NOT_SET;
 
-    private ChroniclePosition position;
-
-    private ChronicleBlockingQueue(File storageDirectory, String name) {
+    private ChronicleBlockingQueue(File storageDirectory, String name, int maxPerSlab) {
         this.storageDirectory = storageDirectory;
         this.name = name;
+        this.maxPerSlab = maxPerSlab;
         this.position = new ChroniclePosition(new File(storageDirectory, name + ".position"));
         appender(); // force initialisation of the appender, will create the first slab
     }
@@ -183,7 +184,8 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
 
     @Override
     public boolean addAll(Collection<? extends E> c) {
-        throw new UnsupportedOperationException();
+        c.forEach(this::add);
+        return true;
     }
 
     @Override
@@ -203,11 +205,32 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
 
     @Override
     public boolean offer(E e) {
+        if (e == null) {
+            throw new NullPointerException("null elements are not permitted");
+        }
+        if (shouldRollSlab()) {
+            releaseCachedAppender();
+        }
         ExcerptAppender appender = appender();
+
         appender.startExcerpt();
         serializer.serialise(e, appender);
         appender.finish();
         return true;
+    }
+
+    private void releaseCachedAppender() {
+        release(cachedAppender);
+        cachedAppender = null;
+        cachedTailerSlabIndex = NOT_SET;
+    }
+
+    private boolean shouldRollSlab() {
+        if (cachedAppender != null) {
+            long size = cachedAppender.chronicle().size();
+            return size >= maxPerSlab;
+        }
+        return false;
     }
 
     @Override
@@ -250,6 +273,7 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
 
         if (slab == 0){
             slab = firstSlabIndex();
+            pos.slab(slab);
         }
         ExcerptTailer tailer = tailerForSlab(slab);
 
@@ -324,6 +348,7 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
     public static class Builder<E> {
         private final File storageDirectory;
         private String name = "chronicleblockingqueue";
+        private int maxPerSlab = 1_000_000;
 
         public Builder(File storageDirectory) {
             if (storageDirectory == null) {
@@ -341,11 +366,16 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
             return this;
         }
 
+        public Builder<E> maxPerSlab(int maxPerSlab) {
+            this.maxPerSlab = maxPerSlab;
+            return this;
+        }
+
         public ChronicleBlockingQueue<E> build() {
             return new ChronicleBlockingQueue<E>(
                     storageDirectory,
-                    name
-            );
+                    name,
+                    maxPerSlab);
         }
     }
 }

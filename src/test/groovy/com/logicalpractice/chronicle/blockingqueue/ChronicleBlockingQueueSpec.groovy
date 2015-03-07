@@ -87,6 +87,22 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
       expect:
       testObject.poll() == null
     }
+
+    def "poll returns the elements in the order they where appended"() {
+      given:
+      def input = [1, 2, 3, 4, 5]
+      def elements = []
+      def value
+
+      testObject.addAll(input)
+
+      when: "read all the elements in the queue"
+      while ((value = testObject.poll()) != null)
+        elements << value
+
+      then:
+      elements == input
+    }
   }
 
   static class AppendToQueue extends ChronicleBlockingQueueSpec {
@@ -110,6 +126,50 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
 
       then:
       testObject.poll() == 1
+    }
+
+    def "can offer many elements"() {
+      expect:
+      (1..10).every { testObject.offer(it) }
+    }
+
+    def "add(null) throws NPE"() {
+      when:
+      testObject.add(null)
+
+      then:
+      thrown NullPointerException
+    }
+  }
+
+  static class MaxPerSlab extends ChronicleBlockingQueueSpec {
+    @AutoCleanup
+    ChronicleBlockingQueue testObject = ChronicleBlockingQueue.builder(tempDir())
+        .maxPerSlab(3)
+        .build()
+
+    def "adding more than maxPerSlab results in additional slab files"() {
+      expect: "initial state is three files"
+      tempDir().list().length == 3
+
+      when:
+      (1..4).each { testObject << it }
+
+      then:
+      tempDir().list().length == 5
+    }
+
+    def "having added more than maxPerSlab, can still read all the elements in order"() {
+      given:
+      testObject.addAll(1..15)
+      def elements = [], value
+      when:
+      while ((value = testObject.poll()) != null)
+        elements << value
+
+
+      then:
+      elements == (1..15) as List
     }
   }
 }
