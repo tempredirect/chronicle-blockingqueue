@@ -191,18 +191,41 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
         }
 
         int slab = position.incrementSlabAndResetIndex();
+        // todo delete old slab that is now not visible
         tailer = cachedTailerForSlab(slab);
+        tailer.toStart();
         return readAndUpdate(tailer, position);
     }
 
     @Override
     public E element() {
-        throw new UnsupportedOperationException();
+        E value = peek();
+        if (value == null) throw new NoSuchElementException();
+        return value;
     }
 
     @Override
     public E peek() {
-        throw new UnsupportedOperationException();
+        int slab = position.slab();
+        ExcerptTailer tailer = cachedTailerForSlab(slab);
+        toPosition(position, tailer);
+
+        if (tailer.nextIndex()) {
+            return deserializer.deserialise(tailer);
+        }
+
+        // maybe the next slab has some?
+        if (slab == cachedAppenderSlabIndex) {
+            // ie we're reading the same thing that is being written
+            return null; // there is nothing more stop looking
+        }
+
+        tailer = cachedTailerForSlab(slab + 1);
+        tailer.toStart();
+        if (tailer.nextIndex()) {
+            return deserializer.deserialise(tailer);
+        }
+        return null;
     }
 
     private ExcerptAppender appender() {

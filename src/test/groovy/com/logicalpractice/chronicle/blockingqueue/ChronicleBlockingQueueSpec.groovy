@@ -277,6 +277,39 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
       ! testObject.iterator().hasNext()
     }
 
+    static class Peek extends ChronicleBlockingQueueSpec {
+      @AutoCleanup
+      ChronicleBlockingQueue testObject = standardQueue()
+
+      def "peek return null on empty queue"() {
+        expect:
+        testObject.peek() == null
+      }
+
+      def "element throws NoSuchElementException on empty queue"() {
+        when:
+        testObject.element()
+
+        then:
+        thrown NoSuchElementException
+      }
+
+      def "peek returns the current tail"() {
+        given:
+        testObject.addAll(1..5)
+
+        expect:
+        testObject.peek() == 1
+      }
+
+      def "element returns the current tail"() {
+        given:
+        testObject.addAll(1..3)
+
+        expect:
+        testObject.element() == 1
+      }
+    }
   }
 
   static class Size extends ChronicleBlockingQueueSpec {
