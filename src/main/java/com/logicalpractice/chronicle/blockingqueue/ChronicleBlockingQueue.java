@@ -10,6 +10,7 @@ import org.jetbrains.annotations.NotNull;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -177,7 +178,8 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
 
     @Override
     public E poll() {
-        ExcerptTailer tailer = cachedTailerForSlab(position.slab());
+        int slab = position.slab();
+        ExcerptTailer tailer = cachedTailerForSlab(slab);
         toPosition(position, tailer);
 
         E value = readAndUpdate(tailer, position);
@@ -185,16 +187,27 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
             return value;
 
         // maybe the next slab has some?
-        if (cachedTailerSlabIndex == cachedAppenderSlabIndex) {
+        if (slab == cachedAppenderSlabIndex) {
             // ie we're reading the same thing that is being written
             return null; // there is nothing more stop looking
         }
 
-        int slab = position.incrementSlabAndResetIndex();
-        // todo delete old slab that is now not visible
-        tailer = cachedTailerForSlab(slab);
+        int nextSlab = position.incrementSlabAndResetIndex();
+        tailer = cachedTailerForSlab(nextSlab); // will close the open tailer so we don't have to worry about it
         tailer.toStart();
+        deleteSlab(slab);
         return readAndUpdate(tailer, position);
+    }
+
+    private void deleteSlab(int slab) {
+        File indexFile = new File(storageDirectory, slabName(slab) + ".index");
+        File dataFile = new File(storageDirectory, slabName(slab) + ".data");
+        try {
+            Files.delete(indexFile.toPath());
+            Files.delete(dataFile.toPath());
+        } catch(IOException e) {
+            throw new RuntimeIOException(e);
+        }
     }
 
     @Override

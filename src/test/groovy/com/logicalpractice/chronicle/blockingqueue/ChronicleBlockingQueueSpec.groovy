@@ -200,7 +200,7 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
     }
   }
 
-  static class MaxPerSlab extends ChronicleBlockingQueueSpec {
+  static class SlabFileManagement extends ChronicleBlockingQueueSpec {
     @AutoCleanup
     ChronicleBlockingQueue testObject = standardQueue(maxPerSlab: 3)
 
@@ -226,6 +226,34 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
       then:
       elements == (1..15) as List
     }
+
+    def "removing elements should clean up defunct slabs"() {
+      given:
+      testObject.addAll(1..10) // that should be 4 slabs (3 full 1 inuse)
+
+      expect:
+      tempDir().list().length == 4 * 2 + 1 // 2 files file slab, plus position file
+
+      when:
+      4.times { testObject.remove() }
+
+      then:
+      tempDir().list().length == 3 * 2 + 1 // one less pair of files
+
+      when:
+      3.times { testObject.remove() }
+
+      then:
+      tempDir().list().length == 2 * 2 + 1
+
+      when:
+      3.times { testObject.remove() }
+
+      then:
+      testObject.empty
+      tempDir().list().length == 2 + 1
+    }
+
   }
 
   static class Iteration extends ChronicleBlockingQueueSpec {
