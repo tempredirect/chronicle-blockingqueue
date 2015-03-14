@@ -16,13 +16,14 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.NoSuchElementException;
 import java.util.Objects;
-import java.util.Queue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
  * BlockingQueue implementation backed by the Chronicle Queue
  */
-public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
+public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseable {
 
     private final static int NOT_SET = -1;
 
@@ -34,6 +35,7 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
     @SuppressWarnings("unchecked")
     private final BytesDeserializer<E> deserializer = (Bytes bytes) -> (E) bytes.readObject();
     private final int maxPerSlab;
+    private final int maxNumberOfSlabs;
     private final ChroniclePosition position;
 
     private ExcerptAppender cachedAppender;
@@ -43,22 +45,29 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
 
     private int cachedTailerSlabIndex = NOT_SET;
 
-    private ChronicleBlockingQueue(File storageDirectory, String name, int maxPerSlab) {
-        this.storageDirectory = storageDirectory;
-        this.name = name;
-        this.maxPerSlab = maxPerSlab;
+    private int numberOfSlabs;
+
+    private ChronicleBlockingQueue(
+            Builder<E> builder
+    ) {
+        this.storageDirectory = builder.storageDirectory;
+        this.name = builder.name;
+        this.maxPerSlab = builder.maxPerSlab;
+        this.maxNumberOfSlabs = builder.maxNumberOfSlabs;
 
         // basic initialisation
         File positionFile = new File(storageDirectory, name + ".position");
         boolean newPositionFile = !positionFile.exists();
 
         this.position = new ChroniclePosition(positionFile);
-        appender(); // force initialisation of the appender, will create the first slab
+        int slab = lastSlabIndex();
+        appender(Math.max(slab, 1)); // force initialisation of the appender, will create the first slab, index = 1
 
         if (newPositionFile) {
             this.position.slab(firstSlabIndex());
             this.position.index(-1);
         }
+        numberOfSlabs = lastSlabIndex() - firstSlabIndex() + 1;
     }
 
     public static <E> ChronicleBlockingQueue.Builder<E> builder(File storageDirectory) {
@@ -92,6 +101,16 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
             }
         }
         return false;
+    }
+
+    @Override
+    public int drainTo(Collection<? super E> c) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public int drainTo(Collection<? super E> c, int maxElements) {
+        throw new UnsupportedOperationException();
     }
 
     @NotNull
@@ -158,15 +177,48 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
         if (e == null) {
             throw new NullPointerException("null elements are not permitted");
         }
+
+        ExcerptAppender appender;
+
         if (shouldRollSlab()) {
-            releaseCachedAppender();
+            if (numberOfSlabs >= maxNumberOfSlabs) {
+                //we are out of room at the inn
+                return false;
+            }
+            appender = nextAppender();
+        } else {
+            appender = cachedAppender();
         }
-        ExcerptAppender appender = appender();
 
         appender.startExcerpt();
         serializer.serialise(e, appender);
         appender.finish();
         return true;
+    }
+
+    @Override
+    public void put(E e) throws InterruptedException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public boolean offer(E e, long timeout, TimeUnit unit) throws InterruptedException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public E take() throws InterruptedException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public E poll(long timeout, TimeUnit unit) throws InterruptedException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public int remainingCapacity() {
+        throw new UnsupportedOperationException();
     }
 
     @Override
@@ -199,7 +251,7 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
         return readAndUpdate(tailer, position);
     }
 
-    private void deleteSlab(int slab) {
+    private synchronized void deleteSlab(int slab) { // synchronized to force visiblity of change of numberOfSlabs
         File indexFile = new File(storageDirectory, slabName(slab) + ".index");
         File dataFile = new File(storageDirectory, slabName(slab) + ".data");
         try {
@@ -208,6 +260,7 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
         } catch(IOException e) {
             throw new RuntimeIOException(e);
         }
+        numberOfSlabs -= 1;
     }
 
     @Override
@@ -241,11 +294,20 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
         return null;
     }
 
-    private ExcerptAppender appender() {
-        if (cachedAppender == null) { // todo add slab capacity check
-            int slab = nextSlabIndex();
-            cachedAppender = chronicleAppender(slab);
-            cachedAppenderSlabIndex = slab;
+    private ExcerptAppender nextAppender() {
+        numberOfSlabs += 1;
+        return appender(nextSlabIndex());
+    }
+
+    private ExcerptAppender cachedAppender() {
+        return appender(cachedAppenderSlabIndex);
+    }
+
+    private ExcerptAppender appender(int slabIndex) {
+        if (cachedAppenderSlabIndex != slabIndex) {
+            release(cachedAppender);
+            cachedAppender = chronicleAppender(slabIndex);
+            cachedAppenderSlabIndex = slabIndex;
         }
 
         return cachedAppender;
@@ -278,10 +340,14 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
     }
 
     private int nextSlabIndex() {
+        return lastSlabIndex() + 1;
+    }
+
+    private int lastSlabIndex() {
         int highest = Arrays.asList(storageDirectory.listFiles(this::isSlabIndex))
                 .stream()
                 .collect(Collectors.summarizingInt(this::slabIndex)).getMax();
-        return highest == Integer.MIN_VALUE ? 1 : highest + 1;
+        return highest == Integer.MIN_VALUE ? 0 : highest;
     }
 
     private int firstSlabIndex() {
@@ -417,6 +483,7 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
         private final File storageDirectory;
         private String name = "chronicleblockingqueue";
         private int maxPerSlab = 1_000_000;
+        public int maxNumberOfSlabs = Integer.MAX_VALUE;
 
         public Builder(File storageDirectory) {
             if (storageDirectory == null) {
@@ -440,11 +507,13 @@ public class ChronicleBlockingQueue<E> implements Queue<E>, AutoCloseable {
             return this;
         }
 
+        public Builder<E> maxNumberOfSlabs(int maxSlabs) {
+            this.maxNumberOfSlabs = maxSlabs;
+            return this;
+        }
+
         public ChronicleBlockingQueue<E> build() {
-            return new ChronicleBlockingQueue<E>(
-                    storageDirectory,
-                    name,
-                    maxPerSlab);
+            return new ChronicleBlockingQueue<E>(this);
         }
     }
 

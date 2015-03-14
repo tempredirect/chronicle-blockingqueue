@@ -2,7 +2,9 @@ package com.logicalpractice.chronicle.blockingqueue
 
 import com.google.common.io.Files as GuavaFiles
 import spock.lang.AutoCleanup
+import spock.lang.Ignore
 import spock.lang.Specification
+import spock.lang.Timeout
 import spock.lang.Unroll
 
 import java.nio.file.FileVisitResult
@@ -10,6 +12,9 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.SimpleFileVisitor
 import java.nio.file.attribute.BasicFileAttributes
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 /**
  *
@@ -28,6 +33,7 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
   ChronicleBlockingQueue standardQueue(HashMap args = [:]) {
     ChronicleBlockingQueue.builder(tempDir())
         .maxPerSlab(args.getOrDefault("maxPerSlab", 10))
+        .maxNumberOfSlabs(args.getOrDefault("maxNumberOfSlabs", Integer.MAX_VALUE))
         .build()
   }
 
@@ -209,7 +215,7 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
       tempDir().list().length == 3
 
       when:
-      (1..4).each { testObject << it }
+      (1..4).each { testObject.add(it) }
 
       then:
       tempDir().list().length == 5
@@ -304,39 +310,39 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
       then:
       ! testObject.iterator().hasNext()
     }
+  }
 
-    static class Peek extends ChronicleBlockingQueueSpec {
-      @AutoCleanup
-      ChronicleBlockingQueue testObject = standardQueue()
+  static class Peek extends ChronicleBlockingQueueSpec {
+    @AutoCleanup
+    ChronicleBlockingQueue testObject = standardQueue()
 
-      def "peek return null on empty queue"() {
-        expect:
-        testObject.peek() == null
-      }
+    def "peek return null on empty queue"() {
+      expect:
+      testObject.peek() == null
+    }
 
-      def "element throws NoSuchElementException on empty queue"() {
-        when:
-        testObject.element()
+    def "element throws NoSuchElementException on empty queue"() {
+      when:
+      testObject.element()
 
-        then:
-        thrown NoSuchElementException
-      }
+      then:
+      thrown NoSuchElementException
+    }
 
-      def "peek returns the current tail"() {
-        given:
-        testObject.addAll(1..5)
+    def "peek returns the current tail"() {
+      given:
+      testObject.addAll(1..5)
 
-        expect:
-        testObject.peek() == 1
-      }
+      expect:
+      testObject.peek() == 1
+    }
 
-      def "element returns the current tail"() {
-        given:
-        testObject.addAll(1..3)
+    def "element returns the current tail"() {
+      given:
+      testObject.addAll(1..3)
 
-        expect:
-        testObject.element() == 1
-      }
+      expect:
+      testObject.element() == 1
     }
   }
 
@@ -349,7 +355,7 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
       testObject.size() == 0
 
       when:
-      testObject << 1
+      testObject.add(1)
 
       then:
       testObject.size() == 1
@@ -359,6 +365,45 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
 
       then:
       testObject.size() == 0
+    }
+  }
+
+  static class MaxNumberOfSlabs extends ChronicleBlockingQueueSpec {
+
+    @AutoCleanup
+    ChronicleBlockingQueue testObject = standardQueue(maxPerSlab: 3, maxNumberOfSlabs: 3)
+
+    def "offer stops accepting entries when full"() {
+      given:
+      testObject.addAll(1..9)
+
+      expect:
+      ! testObject.offer(666)
+    }
+
+    def "add must throw when full"() {
+      given:
+      testObject.addAll(1..9)
+
+      when:
+      testObject.add(666)
+
+      then:
+      thrown IllegalStateException
+    }
+
+    def "offer must begin accepting once a slab worths has been removed"() {
+      given:
+      testObject.addAll(1..9)
+
+      expect:
+      ! testObject.offer(666)
+
+      when:
+      4.times { testObject.remove() }
+
+      then:
+      testObject.offer(666)
     }
   }
 
@@ -427,6 +472,34 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
 
       then:
       result.is(intArray)
+    }
+  }
+
+  public static class BlockingOperations extends ChronicleBlockingQueueSpec {
+
+    @AutoCleanup
+    ChronicleBlockingQueue testObject = standardQueue(maxNumberOfSlabs: 3, maxPerSlab: 3) // limit of 9
+
+    @AutoCleanup("shutdownNow")
+    ExecutorService executor = Executors.newCachedThreadPool()
+
+    @Timeout(10)
+    @Ignore
+    def "can put 20 elements"() {
+      given:
+      def drainer = executor.submit({ 20.times { testObject.take() }}, true)
+
+      when:
+      1..20.each { testObject.put(it) }
+
+      then:
+      noExceptionThrown()
+
+      and:
+      drainer.get()
+
+      cleanup:
+      drainer.cancel(true)
     }
   }
 }
