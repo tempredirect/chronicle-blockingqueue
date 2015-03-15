@@ -15,6 +15,9 @@ import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.Callable
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+
+import static java.util.concurrent.TimeUnit.SECONDS
 
 /**
  *
@@ -32,7 +35,7 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
 
   ChronicleBlockingQueue standardQueue(HashMap args = [:]) {
     ChronicleBlockingQueue.builder(tempDir())
-        .maxPerSlab(args.getOrDefault("maxPerSlab", 10))
+        .slabBlockSize(args.getOrDefault("slabBlockSize", 8 * 1024))
         .maxNumberOfSlabs(args.getOrDefault("maxNumberOfSlabs", Integer.MAX_VALUE))
         .build()
   }
@@ -206,60 +209,42 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
     }
   }
 
+  @Timeout(value = 5, unit = SECONDS)
   static class SlabFileManagement extends ChronicleBlockingQueueSpec {
     @AutoCleanup
-    ChronicleBlockingQueue testObject = standardQueue(maxPerSlab: 3)
+    ChronicleBlockingQueue testObject = standardQueue(maxNumberOfSlabs:3)
 
     def "adding more than maxPerSlab results in additional slab files"() {
       expect: "initial state is three files"
       tempDir().list().length == 3
 
-      when:
-      (1..4).each { testObject.add(it) }
+      when: 'fill the Q'
+      while (testObject.offer("a message"));
 
       then:
-      tempDir().list().length == 5
-    }
-
-    def "having added more than maxPerSlab, can still read all the elements in order"() {
-      given:
-      testObject.addAll(1..15)
-      def elements = [], value
-      when:
-      while ((value = testObject.poll()) != null)
-        elements << value
-
-      then:
-      elements == (1..15) as List
+      tempDir().list().length == 2 * 3 + 1
     }
 
     def "removing elements should clean up defunct slabs"() {
-      given:
-      testObject.addAll(1..10) // that should be 4 slabs (3 full 1 inuse)
+      given: 'a full Q'
+      while (testObject.offer("a message"));
+      def size = testObject.size()
 
       expect:
-      tempDir().list().length == 4 * 2 + 1 // 2 files file slab, plus position file
+      tempDir().list().length == 2 * 3 + 1 // 2 files per slab, plus position file
 
-      when:
-      4.times { testObject.remove() }
+      when: 'remove half the elements'
+      (size / 2).times { testObject.remove() }
 
-      then:
-      tempDir().list().length == 3 * 2 + 1 // one less pair of files
+      then: 'one pair of .data and .index files must be removed'
+      tempDir().list().length == 2 * 2 + 1 // one less pair of files
 
-      when:
-      3.times { testObject.remove() }
+      when: 'empty the remaining elements'
+      while ( testObject.poll() ) ;
 
-      then:
-      tempDir().list().length == 2 * 2 + 1
-
-      when:
-      3.times { testObject.remove() }
-
-      then:
-      testObject.empty
+      then: 'only the live and position files remain'
       tempDir().list().length == 2 + 1
     }
-
   }
 
   static class Iteration extends ChronicleBlockingQueueSpec {
@@ -368,22 +353,23 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
     }
   }
 
-  static class MaxNumberOfSlabs extends ChronicleBlockingQueueSpec {
+  @Timeout(value = 5, unit = SECONDS)
+  static class Capacity extends ChronicleBlockingQueueSpec {
 
     @AutoCleanup
-    ChronicleBlockingQueue testObject = standardQueue(maxPerSlab: 3, maxNumberOfSlabs: 3)
+    ChronicleBlockingQueue testObject = standardQueue(slabBlockSize: 1024, maxNumberOfSlabs: 3)
 
     def "offer stops accepting entries when full"() {
-      given:
-      testObject.addAll(1..9)
+      given: "a full Q"
+      while (testObject.offer(1));
 
       expect:
       ! testObject.offer(666)
     }
 
     def "add must throw when full"() {
-      given:
-      testObject.addAll(1..9)
+      given: "a full Q"
+      while (testObject.offer(1));
 
       when:
       testObject.add(666)
@@ -393,14 +379,12 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
     }
 
     def "offer must begin accepting once a slab worths has been removed"() {
-      given:
-      testObject.addAll(1..9)
-
-      expect:
-      ! testObject.offer(666)
+      given: "a full Q"
+      while (testObject.offer(1));
+      def size = testObject.size()
 
       when:
-      4.times { testObject.remove() }
+      (size / 2).times { testObject.remove() }
 
       then:
       testObject.offer(666)
@@ -478,7 +462,7 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
   public static class BlockingOperations extends ChronicleBlockingQueueSpec {
 
     @AutoCleanup
-    ChronicleBlockingQueue testObject = standardQueue(maxNumberOfSlabs: 3, maxPerSlab: 3) // limit of 9
+    ChronicleBlockingQueue testObject = standardQueue(maxNumberOfSlabs: 3)
 
     @AutoCleanup("shutdownNow")
     ExecutorService executor = Executors.newCachedThreadPool()

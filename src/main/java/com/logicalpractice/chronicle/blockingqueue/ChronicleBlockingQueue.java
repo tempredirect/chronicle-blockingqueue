@@ -27,15 +27,12 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
 
     private final static int NOT_SET = -1;
 
-    private final File storageDirectory;
-    private final String name;
+    private final Builder<E> config;
     private final BytesSerializer<E> serializer = (E element, Bytes bytes) -> {
         bytes.writeObject(element);
     };
     @SuppressWarnings("unchecked")
     private final BytesDeserializer<E> deserializer = (Bytes bytes) -> (E) bytes.readObject();
-    private final int maxPerSlab;
-    private final int maxNumberOfSlabs;
     private final ChroniclePosition position;
 
     private ExcerptAppender cachedAppender;
@@ -50,13 +47,10 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
     private ChronicleBlockingQueue(
             Builder<E> builder
     ) {
-        this.storageDirectory = builder.storageDirectory;
-        this.name = builder.name;
-        this.maxPerSlab = builder.maxPerSlab;
-        this.maxNumberOfSlabs = builder.maxNumberOfSlabs;
+        this.config = builder.clone();
 
         // basic initialisation
-        File positionFile = new File(storageDirectory, name + ".position");
+        File positionFile = new File(config.storageDirectory, config.name + ".position");
         boolean newPositionFile = !positionFile.exists();
 
         this.position = new ChroniclePosition(positionFile);
@@ -180,17 +174,27 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
 
         ExcerptAppender appender;
 
-        if (shouldRollSlab()) {
-            if (numberOfSlabs >= maxNumberOfSlabs) {
-                //we are out of room at the inn
+//        if (shouldRollSlab()) {
+//            if (numberOfSlabs >= maxNumberOfSlabs) {
+//                we are out of room at the inn
+//                return false;
+//            }
+//            appender = nextAppender();
+//        } else {
+//        }
+
+        appender = cachedAppender();
+        try {
+            appender.startExcerpt();
+        } catch (IllegalStateException ignored) {
+            if (numberOfSlabs < config.maxNumberOfSlabs) {
+                appender = nextAppender();
+                appender.startExcerpt();
+            } else {
+                // we're over capacity
                 return false;
             }
-            appender = nextAppender();
-        } else {
-            appender = cachedAppender();
         }
-
-        appender.startExcerpt();
         serializer.serialise(e, appender);
         appender.finish();
         return true;
@@ -252,8 +256,8 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
     }
 
     private synchronized void deleteSlab(int slab) { // synchronized to force visiblity of change of numberOfSlabs
-        File indexFile = new File(storageDirectory, slabName(slab) + ".index");
-        File dataFile = new File(storageDirectory, slabName(slab) + ".data");
+        File indexFile = new File(config.storageDirectory, slabName(slab) + ".index");
+        File dataFile = new File(config.storageDirectory, slabName(slab) + ".data");
         try {
             Files.delete(indexFile.toPath());
             Files.delete(dataFile.toPath());
@@ -316,7 +320,11 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
     private Chronicle chronicle(int slab) {
         try {
             return ChronicleQueueBuilder
-                    .indexed(storageDirectory, slabName(slab))
+                    .indexed(config.storageDirectory, slabName(slab))
+                    .useCheckedExcerpt(true) // self protection
+                    .messageCapacity(config.messageCapacity)
+                    .dataBlockSize(config.slabBlockSize)
+                    .maxDataBlocks(1)
                     .build();
         } catch (IOException e) {
             throw new RuntimeIOException(e);
@@ -344,20 +352,20 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
     }
 
     private int lastSlabIndex() {
-        int highest = Arrays.asList(storageDirectory.listFiles(this::isSlabIndex))
+        int highest = Arrays.asList(config.storageDirectory.listFiles(this::isSlabIndex))
                 .stream()
                 .collect(Collectors.summarizingInt(this::slabIndex)).getMax();
         return highest == Integer.MIN_VALUE ? 0 : highest;
     }
 
     private int firstSlabIndex() {
-        return Arrays.asList(storageDirectory.listFiles(this::isSlabIndex))
+        return Arrays.asList(config.storageDirectory.listFiles(this::isSlabIndex))
                 .stream()
                 .collect(Collectors.summarizingInt(this::slabIndex)).getMin();
     }
 
     private String slabName(int i) {
-        return name + '-' + i;
+        return config.name + '-' + i;
     }
 
     boolean isSlabIndex(File file) {
@@ -378,8 +386,8 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
     private int slabIndex(File file) {
         String filename = file.getName();
         int firstDotIndex = filename.indexOf('.');
-        if (filename.startsWith(name + '-') && firstDotIndex > -1) {
-            String indexPart = filename.substring((name + '-').length(), firstDotIndex);
+        if (filename.startsWith(config.name + '-') && firstDotIndex > -1) {
+            String indexPart = filename.substring((config.name + '-').length(), firstDotIndex);
             String extension = filename.substring(firstDotIndex);
             if (numeric(indexPart) && extension.equals(".index")) {
                 return Integer.parseInt(indexPart, 10);
@@ -392,14 +400,6 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
         release(cachedAppender);
         cachedAppender = null;
         cachedTailerSlabIndex = NOT_SET;
-    }
-
-    private boolean shouldRollSlab() {
-        if (cachedAppender != null) {
-            long size = cachedAppender.chronicle().size();
-            return size >= maxPerSlab;
-        }
-        return false;
     }
 
     private E readAndUpdate(ExcerptTailer tailer, ChroniclePosition position) {
@@ -479,11 +479,15 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
         return copy;
     }
 
-    public static class Builder<E> {
+    public static class Builder<E> implements Cloneable {
         private final File storageDirectory;
         private String name = "chronicleblockingqueue";
-        private int maxPerSlab = 1_000_000;
-        public int maxNumberOfSlabs = Integer.MAX_VALUE;
+        private int maxNumberOfSlabs = Integer.MAX_VALUE;
+
+        // parameters for the underlying chronicle
+        private int slabBlockSize = 1024 * 1024 * 64; // 64MB maps to dataBlockSize
+        private int messageCapacity = 128 * 1024; // 128KB
+        private boolean useCheckedExcerpt = true;
 
         public Builder(File storageDirectory) {
             if (storageDirectory == null) {
@@ -497,14 +501,17 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
             this.storageDirectory = storageDirectory;
         }
 
+        public File storageDirectory() {
+            return storageDirectory;
+        }
+
         public Builder<E> name(String name) {
             this.name = Objects.requireNonNull(name);
             return this;
         }
 
-        public Builder<E> maxPerSlab(int maxPerSlab) {
-            this.maxPerSlab = maxPerSlab;
-            return this;
+        public String name() {
+            return name;
         }
 
         public Builder<E> maxNumberOfSlabs(int maxSlabs) {
@@ -512,8 +519,40 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
             return this;
         }
 
+        public int maxNumberOfSlabs() {
+            return maxNumberOfSlabs;
+        }
+
+        public int slabBlockSize() {
+            return slabBlockSize;
+        }
+
+        public Builder<E> slabBlockSize(int slabBlockSize) {
+            this.slabBlockSize = slabBlockSize;
+            return this;
+        }
+
+        public int messageCapacity() {
+            return messageCapacity;
+        }
+
+        public Builder<E> messageCapacity(int messageCapacity) {
+            this.messageCapacity = messageCapacity;
+            return this;
+        }
+
         public ChronicleBlockingQueue<E> build() {
             return new ChronicleBlockingQueue<E>(this);
+        }
+
+        @SuppressWarnings("unchecked")
+        @Override
+        public Builder<E> clone() {
+            try {
+                return (Builder<E>) super.clone();
+            } catch (CloneNotSupportedException e) {
+                throw new AssertionError(e);
+            }
         }
     }
 
