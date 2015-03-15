@@ -20,6 +20,8 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
+
 /**
  * BlockingQueue implementation backed by the Chronicle Queue
  */
@@ -202,27 +204,78 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
 
     @Override
     public void put(E e) throws InterruptedException {
-        throw new UnsupportedOperationException();
+        Thread currentThread = null;
+        // todo either replace spin with lock/notify or improve spin
+        while (!offer(e)) {
+            if (currentThread == null) {
+                currentThread = Thread.currentThread();
+            }
+            if (currentThread.isInterrupted()) {
+                throw new InterruptedException();
+            }
+        }
     }
 
     @Override
-    public boolean offer(E e, long timeout, TimeUnit unit) throws InterruptedException {
-        throw new UnsupportedOperationException();
+    public boolean offer(E e, long timeout, @NotNull TimeUnit unit) throws InterruptedException {
+        long start = System.nanoTime();
+        long deadline = start + NANOSECONDS.convert(timeout, unit);
+        Thread currentThread = null;
+        // todo either replace spin with lock/notify or improve spin
+        while (!offer(e)) {
+            if (currentThread == null) {
+                currentThread = Thread.currentThread();
+            }
+            if (currentThread.isInterrupted()) {
+                throw new InterruptedException();
+            }
+            if (System.nanoTime() > deadline) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override
     public E take() throws InterruptedException {
-        throw new UnsupportedOperationException();
+        Thread currentThread = null;
+        // todo either replace spin with lock/notify or improve spin
+        E result;
+        while ((result = poll()) == null) {
+            if (currentThread == null) {
+                currentThread = Thread.currentThread();
+            }
+            if (currentThread.isInterrupted()) {
+                throw new InterruptedException();
+            }
+        }
+        return result;
     }
 
     @Override
-    public E poll(long timeout, TimeUnit unit) throws InterruptedException {
-        throw new UnsupportedOperationException();
+    public E poll(long timeout, @NotNull TimeUnit unit) throws InterruptedException {
+        long start = System.nanoTime();
+        long deadline = start + NANOSECONDS.convert(timeout, unit);
+        Thread currentThread = null;
+        // todo either replace spin with lock/notify or improve spin
+        E result;
+        while ((result = poll()) == null) {
+            if (currentThread == null) {
+                currentThread = Thread.currentThread();
+            }
+            if (currentThread.isInterrupted()) {
+                throw new InterruptedException();
+            }
+            if (System.nanoTime() > deadline) {
+                return null;
+            }
+        }
+        return result;
     }
 
     @Override
     public int remainingCapacity() {
-        throw new UnsupportedOperationException();
+        return Integer.MAX_VALUE;
     }
 
     @Override

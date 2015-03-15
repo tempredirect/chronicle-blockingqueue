@@ -6,6 +6,7 @@ import spock.lang.Ignore
 import spock.lang.Specification
 import spock.lang.Timeout
 import spock.lang.Unroll
+import spock.util.concurrent.BlockingVariable
 
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
@@ -17,6 +18,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
+import static java.util.concurrent.TimeUnit.MILLISECONDS
 import static java.util.concurrent.TimeUnit.SECONDS
 
 /**
@@ -126,11 +128,16 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
 
   static class RemoveOperations extends ChronicleBlockingQueueSpec {
     @AutoCleanup
-    ChronicleBlockingQueue testObject = standardQueue(maxPerSlab: 3) // makes sure it slabs
+    ChronicleBlockingQueue testObject = standardQueue()
 
     def "poll returns null if empty"() {
       expect:
       testObject.poll() == null
+    }
+
+    def "poll returns null if empty and called many times"() {
+      expect:
+      (1..10).every { testObject.poll() == null }
     }
 
     def "remove throws on empty"() {
@@ -459,6 +466,7 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
     }
   }
 
+  @Timeout(value = 5, unit = SECONDS)
   public static class BlockingOperations extends ChronicleBlockingQueueSpec {
 
     @AutoCleanup
@@ -467,23 +475,132 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
     @AutoCleanup("shutdownNow")
     ExecutorService executor = Executors.newCachedThreadPool()
 
-    @Timeout(10)
-    @Ignore
-    def "can put 20 elements"() {
-      given:
-      def drainer = executor.submit({ 20.times { testObject.take() }}, true)
+    def "put blocks until there we remove enough space"() {
+      given: 'a full Q'
+      while (testObject.offer(1));
+      def size = testObject.size()
+      def putStarted = new BlockingVariable()
 
       when:
-      1..20.each { testObject.put(it) }
+      def put = executor.submit({
+        putStarted.set(true)
+        testObject.put(2)
+      }, Boolean.TRUE)
 
-      then:
-      noExceptionThrown()
+      then: 'put has started but not finished'
+      putStarted.get()
+      ! put.isDone()
 
-      and:
-      drainer.get()
+      when: 'empty half the Q'
+      (size/2).times { testObject.remove() }
+
+      then: 'put should complete'
+      put.get()
+
+      and: 'the Q should contain the value 2'
+      testObject.any { it == 2 }
 
       cleanup:
-      drainer.cancel(true)
+      put?.cancel(true)
+    }
+
+    def "take blocks until element is available"() {
+      given:
+      def taking = new BlockingVariable()
+      def taker = executor.submit({
+        taking.set(true)
+        testObject.take()
+      } as Callable)
+
+      when:
+      taking.get()
+      testObject << 42
+
+      then:
+      taker.get() == 42
+    }
+
+    def "put is interruptable"() {
+      given: 'a full Q'
+      def caught = null
+      while (testObject.offer(1));
+      Thread put = Thread.start {
+        try {
+          testObject.put(1)
+        } catch (InterruptedException e) {
+          caught = e
+        }
+      }
+
+      when:
+      put.interrupt()
+      put.join()
+
+      then:
+      caught instanceof InterruptedException
+
+      cleanup:
+      put?.stop()
+    }
+
+    def "take is interruptable"() {
+      given:
+      def caught = null
+      def taking = new BlockingVariable()
+      Thread take = Thread.start {
+        taking.set(true)
+        try {
+          testObject.take()
+        } catch (Exception e) {
+          caught = e
+        }
+      }
+
+      expect:
+      taking.get() == true
+
+      when:
+      Thread.sleep(1)
+      take.interrupt()
+      take.join()
+
+      then:
+      caught instanceof InterruptedException
+
+      cleanup:
+      take?.stop()
+    }
+
+    def "offer with timeout - times out in ~timeout"() {
+      given: 'a full Q'
+      while (testObject.offer(1));
+
+      def start = System.nanoTime()
+
+      when:
+      def result = testObject.offer(2, 1, MILLISECONDS)
+      def finished = System.nanoTime()
+
+      then:
+      !result
+      def time = finished - start
+      time >= MILLISECONDS.toNanos(1)
+      time <= MILLISECONDS.toNanos(10) // high upper limit
+    }
+
+    def "poll with timeout - times out in ~timeout"() {
+      given:
+      def start = System.nanoTime()
+
+      when:
+      def result = testObject.poll(1, MILLISECONDS)
+      def finished = System.nanoTime()
+
+      then:
+      result == null
+      def time = (finished - start)
+      time >= MILLISECONDS.toNanos(1)
+      time <= MILLISECONDS.toNanos(10)
     }
   }
 }
