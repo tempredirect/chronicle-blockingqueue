@@ -603,4 +603,55 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
       time <= MILLISECONDS.toNanos(10)
     }
   }
+
+  static class Drain extends ChronicleBlockingQueueSpec {
+
+    def testObject = standardQueue()
+
+
+    def "drain(self) -throws illegal argument exception"() {
+      when:
+      testObject.drainTo(testObject)
+
+      then:
+      thrown IllegalArgumentException
+    }
+
+    def "drain(collect) drains all the elements to the given collection"() {
+      given:
+      testObject.addAll(1..15)
+      def target = []
+
+      when:
+      def transferred = testObject.drainTo target
+
+      then:
+      testObject.empty
+      transferred == 15
+      target == (1..15) as List
+    }
+
+    def "drain(self, int) -throws illegal argument exception"() {
+      when:
+      testObject.drainTo(testObject, 42)
+
+      then:
+      thrown IllegalArgumentException
+    }
+
+    def "drain(collect, max) drains max elements to the given collection"() {
+      given:
+      testObject.addAll(1..15)
+      def target = []
+
+      when:
+      def transferred = testObject.drainTo(target, 10)
+
+      then:
+      testObject.size() == 5
+      transferred == 10
+      target.size() == 10
+      target == (1..10) as List
+    }
+  }
 }

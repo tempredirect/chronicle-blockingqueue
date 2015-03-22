@@ -101,12 +101,27 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
 
     @Override
     public int drainTo(Collection<? super E> c) {
-        throw new UnsupportedOperationException();
+        return drainTo(c, Integer.MAX_VALUE);
     }
 
     @Override
     public int drainTo(Collection<? super E> c, int maxElements) {
-        throw new UnsupportedOperationException();
+        if (c == this)
+            throw new IllegalArgumentException();
+
+        if (maxElements <= 0)
+            return 0;
+
+        int count;
+        for (count = 0; count < maxElements; count ++) {
+            E val = this.poll();
+            if (val == null) {
+                break; // no more elements left
+            }
+            c.add(val);
+        }
+
+        return count;
     }
 
     @NotNull
