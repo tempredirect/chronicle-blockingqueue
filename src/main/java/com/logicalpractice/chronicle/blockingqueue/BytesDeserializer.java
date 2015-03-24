@@ -10,7 +10,8 @@ public interface BytesDeserializer<E> {
     /**
      * Return a new value from the given input.
      *
-     * @param bytes required Bytes positioned such that the next byte is the first byte of the serialized value
+     * @param bytes required Bytes positioned such that the next byte is the first
+     *              byte of the serialized value
      * @return deserialized value, never null
      */
     E deserialize(Bytes bytes);

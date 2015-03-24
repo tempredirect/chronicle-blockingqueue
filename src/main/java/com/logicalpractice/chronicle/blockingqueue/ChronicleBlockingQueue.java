@@ -186,21 +186,28 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
             throw new NullPointerException("null elements are not permitted");
         }
 
+        BytesSerializer<E> serializer = config.serializer();
+
+        int weight = serializer.weigh(e);
+        if (weight == -1) {
+            weight = config.messageCapacity();
+        }
+
         ExcerptAppender appender;
 
         appender = cachedAppender();
         try {
-            appender.startExcerpt();
+            appender.startExcerpt(weight);
         } catch (IllegalStateException ignored) {
             if (numberOfSlabs < config.maxNumberOfSlabs) {
                 appender = nextAppender();
-                appender.startExcerpt();
+                appender.startExcerpt(weight);
             } else {
                 // we're over capacity
                 return false;
             }
         }
-        config.serializer.serialize(e, appender);
+        serializer.serialize(e, appender);
         appender.finish();
         return true;
     }
@@ -678,7 +685,7 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
     }
 
     private E deserialise(ExcerptTailer tailer) {
-        E value = config.deserializer.deserialize(tailer);
+        E value = config.deserializer().deserialize(tailer);
         if (value == null) {
             throw new IllegalStateException("Deserializer has returned null for index:" + tailer.index());
         }
