@@ -15,26 +15,23 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.NoSuchElementException;
-import java.util.Objects;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 
 /**
- * BlockingQueue implementation backed by the Chronicle Queue
+ * BlockingQueue implementation backed by a series of Chronicle Queues.
+ *
+ * <p></p>
  */
 public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseable {
 
     private final static int NOT_SET = -1;
 
     private final Builder<E> config;
-    private final BytesSerializer<E> serializer = (E element, Bytes bytes) -> {
-        bytes.writeObject(element);
-    };
-    @SuppressWarnings("unchecked")
-    private final BytesDeserializer<E> deserializer = (Bytes bytes) -> (E) bytes.readObject();
     private final ChroniclePosition position;
 
     private ExcerptAppender cachedAppender;
@@ -191,15 +188,6 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
 
         ExcerptAppender appender;
 
-//        if (shouldRollSlab()) {
-//            if (numberOfSlabs >= maxNumberOfSlabs) {
-//                we are out of room at the inn
-//                return false;
-//            }
-//            appender = nextAppender();
-//        } else {
-//        }
-
         appender = cachedAppender();
         try {
             appender.startExcerpt();
@@ -212,7 +200,7 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
                 return false;
             }
         }
-        serializer.serialise(e, appender);
+        config.serializer.serialize(e, appender);
         appender.finish();
         return true;
     }
@@ -349,7 +337,7 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
         toPosition(position, tailer);
 
         if (tailer.nextIndex()) {
-            return deserializer.deserialise(tailer);
+            return deserialise(tailer);
         }
 
         // maybe the next slab has some?
@@ -361,7 +349,7 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
         tailer = cachedTailerForSlab(slab + 1);
         tailer.toStart();
         if (tailer.nextIndex()) {
-            return deserializer.deserialise(tailer);
+            return deserialise(tailer);
         }
         return null;
     }
@@ -472,7 +460,7 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
 
     private E readAndUpdate(ExcerptTailer tailer, ChroniclePosition position) {
         if (tailer.nextIndex()) {
-            E value = deserializer.deserialise(tailer);
+            E value = deserialise(tailer);
 
             position.index((int) tailer.index());
             return value;
@@ -557,6 +545,12 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
         private int messageCapacity = 128 * 1024; // 128KB
         private boolean useCheckedExcerpt = true;
 
+        private BytesSerializer<E> serializer = (E element, Bytes bytes) -> {
+            bytes.writeObject(element);
+        };
+        @SuppressWarnings("unchecked")
+        private BytesDeserializer<E> deserializer = (Bytes bytes) -> (E) bytes.readObject();
+
         public Builder(File storageDirectory) {
             if (storageDirectory == null) {
                 throw new IllegalArgumentException("storageDirectory is required");
@@ -569,12 +563,19 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
             this.storageDirectory = storageDirectory;
         }
 
+        private <V> V require(V value, String name, Predicate<V> assertion) {
+            if (!assertion.test(value)) {
+                throw new IllegalArgumentException("value [" + value + "] for [" + name + "] is invalid");
+            }
+            return value;
+        }
+
         public File storageDirectory() {
             return storageDirectory;
         }
 
         public Builder<E> name(String name) {
-            this.name = Objects.requireNonNull(name);
+            this.name = require(name, "name", (v) -> v != null);
             return this;
         }
 
@@ -583,7 +584,7 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
         }
 
         public Builder<E> maxNumberOfSlabs(int maxSlabs) {
-            this.maxNumberOfSlabs = maxSlabs;
+            this.maxNumberOfSlabs = require(maxSlabs, "maxNumberOfSlabs", (v) -> v > 1);
             return this;
         }
 
@@ -596,7 +597,7 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
         }
 
         public Builder<E> slabBlockSize(int slabBlockSize) {
-            this.slabBlockSize = slabBlockSize;
+            this.slabBlockSize = require(slabBlockSize, "slabBlockSize", (v) -> slabBlockSize > 1024);
             return this;
         }
 
@@ -605,7 +606,25 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
         }
 
         public Builder<E> messageCapacity(int messageCapacity) {
-            this.messageCapacity = messageCapacity;
+            this.messageCapacity = require(messageCapacity, "messageCapacity", (v) -> v > 0);
+            return this;
+        }
+
+        public BytesSerializer<E> serializer() {
+            return serializer;
+        }
+
+        public Builder serializer(BytesSerializer<E> serializer) {
+            this.serializer = require(serializer, "serializer", (v) -> v != null);
+            return this;
+        }
+
+        public BytesDeserializer<E> deserializer() {
+            return deserializer;
+        }
+
+        public Builder deserializer(BytesDeserializer<E> deserializer) {
+            this.deserializer = require(deserializer, "deserializer", (v) -> v != null);
             return this;
         }
 
@@ -637,7 +656,7 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
         @Override
         protected E computeNext() {
             if (tailer.nextIndex()) {
-                return deserializer.deserialise(tailer);
+                return deserialise(tailer);
             }
             if (slab == cachedAppenderSlabIndex) {
                 close();
@@ -656,5 +675,13 @@ public class ChronicleBlockingQueue<E> implements BlockingQueue<E>, AutoCloseabl
             release(tailer);
             tailer = null; //
         }
+    }
+
+    private E deserialise(ExcerptTailer tailer) {
+        E value = config.deserializer.deserialize(tailer);
+        if (value == null) {
+            throw new IllegalStateException("Deserializer has returned null for index:" + tailer.index());
+        }
+        return value;
     }
 }

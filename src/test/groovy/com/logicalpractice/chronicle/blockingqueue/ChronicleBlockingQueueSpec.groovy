@@ -21,9 +21,6 @@ import java.util.concurrent.TimeUnit
 import static java.util.concurrent.TimeUnit.MILLISECONDS
 import static java.util.concurrent.TimeUnit.SECONDS
 
-/**
- *
- */
 abstract class ChronicleBlockingQueueSpec extends Specification {
 
   private File tempDir
@@ -36,10 +33,16 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
   }
 
   ChronicleBlockingQueue standardQueue(HashMap args = [:]) {
-    ChronicleBlockingQueue.builder(tempDir())
+    def builder = ChronicleBlockingQueue.builder(tempDir())
         .slabBlockSize(args.getOrDefault("slabBlockSize", 8 * 1024))
         .maxNumberOfSlabs(args.getOrDefault("maxNumberOfSlabs", Integer.MAX_VALUE))
-        .build()
+
+    if ('deserializer' in args)
+      builder.deserializer(args.deserializer)
+    if ('serializer' in args)
+      builder.serializer(args.serializer)
+
+    builder.build()
   }
 
   def cleanup()  {
@@ -652,6 +655,39 @@ abstract class ChronicleBlockingQueueSpec extends Specification {
       transferred == 10
       target.size() == 10
       target == (1..10) as List
+    }
+  }
+
+  static class Serialisation extends ChronicleBlockingQueueSpec {
+
+    def "custom serializer/deserializer pair"() {
+      given:
+      def testObject = standardQueue(
+          serializer: { val, bytes -> bytes.writeInt(val) },
+          deserializer: { bytes -> bytes.readInt() }
+      )
+
+      when:
+      testObject.addAll(1..50)
+      def output = []
+      testObject.drainTo output
+
+      then:
+      output == (1..50) as List
+    }
+
+    def "custom serializer but not deserializer explodes"() {
+      given:
+      def testObject = standardQueue(
+          serializer: { val, bytes -> bytes.writeInt(val) }
+      )
+      testObject.addAll(1..50)
+
+      when:
+      testObject.poll()
+
+      then:
+      thrown IllegalStateException
     }
   }
 }
